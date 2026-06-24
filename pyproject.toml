@@ -1,0 +1,21 @@
+[build-system]
+requires = ["hatchling"]          # what to install to build your package
+build-backend = "hatchling.build"
+
+[project]
+name = "merge-google-photos-meta"
+version = "0.1.0"
+description = "Tool to Merge Google Photos Metadata"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = ["typer"]
+
+[project.optional-dependencies]
+dev = ["build", "twine", "pytest", "pytest-cov"]
+
+[project.scripts]
+merge-google-photos-meta = "merge_google_photos_meta.cli:app"
+mgpm = "merge_google_photos_meta.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/merge_google_photos_meta"]
