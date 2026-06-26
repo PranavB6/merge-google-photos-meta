@@ -9,6 +9,7 @@ from merge_google_photos_meta.exiftool import (
     ExifToolError,
     UnsupportedFileType,
     read_metadata,
+    read_metadata_batch,
     write_metadata,
     write_metadata_batch,
 )
@@ -131,8 +132,11 @@ def test_write_metadata_video_uses_quicktime_tags():
 
     args = run.call_args.args[0]
     assert args[-1] == "clip.mp4"
-    # QuickTime date tags, not EXIF/AllDates.
-    assert "-QuickTime:CreateDate=2024:01:02 03:04:05" in args
+    # QuickTime date tags under QuickTimeUTC, with an explicit +00:00 offset so
+    # Google displays them verbatim. Not EXIF/AllDates.
+    assert "-api" in args and "QuickTimeUTC=1" in args
+    assert "-QuickTime:CreateDate=2024:01:02 03:04:05+00:00" in args
+    assert "-Keys:CreationDate=2024:01:02 03:04:05+00:00" in args
     assert not any(a.startswith("-AllDates") for a in args)
     # Single combined coordinate tag, signed, rounded to 5 decimals.
     assert "-Keys:GPSCoordinates=37.12346, -122.25000, 10.0" in args
@@ -166,6 +170,50 @@ def test_write_metadata_rejects_empty_update():
     run.assert_not_called()
 
 
+def test_read_metadata_batch_keys_by_source_file():
+    payload = json.dumps(
+        [
+            {"SourceFile": "a.jpg", "EXIF:DateTimeOriginal": "2024:01:02 03:04:05"},
+            {"SourceFile": "b.jpg", "EXIF:DateTimeOriginal": "2020:06:07 08:09:10"},
+        ]
+    )
+    with mock.patch("subprocess.run", return_value=_completed(payload)) as run:
+        result = read_metadata_batch("/usr/bin/exiftool", ["a.jpg", "b.jpg"])
+
+    run.assert_called_once()
+    args = run.call_args.args[0]
+    assert args[:3] == ["/usr/bin/exiftool", "-json", "-G"]
+    assert result["a.jpg"]["EXIF:DateTimeOriginal"] == "2024:01:02 03:04:05"
+    assert set(result) == {"a.jpg", "b.jpg"}
+
+
+def test_read_metadata_batch_omits_unreadable_files():
+    # ExifTool returns no JSON object for files it couldn't read.
+    payload = json.dumps([{"SourceFile": "good.jpg", "File:FileName": "good.jpg"}])
+    with mock.patch(
+        "subprocess.run",
+        return_value=_completed(payload, stderr="Error: File not found - bad.jpg\n"),
+    ):
+        result = read_metadata_batch("/usr/bin/exiftool", ["good.jpg", "bad.jpg"])
+
+    assert "good.jpg" in result
+    assert result.get("bad.jpg") is None
+
+
+def test_read_metadata_batch_chunks_by_batch_size():
+    def _per_chunk(cmd, **kwargs):
+        paths = [a for a in cmd[3:]]  # after exiftool -json -G
+        payload = json.dumps([{"SourceFile": p} for p in paths])
+        return subprocess.CompletedProcess(cmd, 0, stdout=payload, stderr="")
+
+    paths = [f"f{i}.jpg" for i in range(5)]
+    with mock.patch("subprocess.run", side_effect=_per_chunk) as run:
+        result = read_metadata_batch("/usr/bin/exiftool", paths, batch_size=2)
+
+    assert run.call_count == 3  # 2, 2, 1
+    assert set(result) == set(paths)
+
+
 def _fake_batch_run(*, stderr: str = "", returncode: int = 0):
     """A subprocess.run replacement returning a canned result per chunk."""
 
@@ -193,7 +241,7 @@ def test_write_metadata_batch_single_process_per_chunk():
     args = _chunk_args(run.call_args)
     assert "-IPTC:Caption-Abstract=first" in args
     assert "a.jpg" in args and "clip.mp4" in args
-    assert "-QuickTime:CreateDate=2024:01:02 03:04:05" in args
+    assert "-QuickTime:CreateDate=2024:01:02 03:04:05+00:00" in args
     assert args.count("-execute") == 2
     assert result.updated == ["a.jpg", "clip.mp4"]
     assert result.failed == []
