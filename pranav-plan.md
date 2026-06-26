@@ -12,7 +12,7 @@ Here are the steps it should take:
 
 1. Prompt the user a few things:
     1. Should the source folder be copied (so that the original photos are untouched)? - The default should be yes
-        1. If the source folder is going to be copied, what folder should it be copied to? - The default should be something like "merge-google-photos-meta-output/<original-folder-name>"
+        1. If the source folder is going to be copied, what folder should it be copied to? - The default should be something like "output-merge-google-photos-meta/<original-folder-name>"
         1. If the source folder isn't going to be copied, ask a second confirmation i.e. "are you sure? the original files will be modified"
     2. For the files without a metadata file, should the program attempt to extract the original date / date taken from the file name?
     - Also support a `--dry-run` flag that runs steps 2–8 and prints the report
@@ -104,9 +104,12 @@ Here are the steps it should take:
         - **Photos:** `EXIF:DateTimeOriginal`. **Decided (#2): write the UTC value
           as-is, no timezone derivation** — accept that displayed times will be
           off by the local UTC offset. (No `timezonefinder` dependency.)
-          For EXIF-less formats (PNG): `XMP:DateCreated` → `XMP:DateTimeOriginal`.
-          *(Current `_image_write_args` writes the datetime as-is via `-AllDates`,
-          which matches this decision but still has no XMP path for PNG.)*
+          PNG: **round-trip test (#5) proved Google reads `EXIF:DateTimeOriginal`
+          from a PNG's `eXIf` chunk**, so the current `-AllDates` path is correct
+          for PNG too — no XMP path needed. (The doc's "PNG has no EXIF" premise
+          is outdated; only the native `PNG:CreationTime` tEXt chunk is ignored
+          by Google.) `_image_write_args` writes the datetime as-is via
+          `-AllDates`, matching this decision.
         - **Videos:** `-api QuickTimeUTC=1` + `QuickTime:CreateDate` +
           `Keys:CreationDate`, writing the true UTC instant with a **`+00:00`
           offset** (no derivation, per #2). **Proven by round-trip test (#1) and
@@ -189,3 +192,9 @@ writes are destructive + partial-failure-prone, so we persist progress.
    - `2015-06-26 05.20.33`
    - `Screenshot_…` timestamped variants
    - …each optionally followed by ` (1)`, `(1)`, or `-1` before the extension.
+5. **PNG date tag — DECIDED via round-trip test: no change needed.** Uploaded one
+   PNG per tag with the same date; Google displayed it correctly for
+   `EXIF:DateTimeOriginal` (current `-AllDates` path), `XMP:DateCreated`, and
+   `XMP:DateTimeOriginal`, but **ignored** the native `PNG:CreationTime`. So the
+   existing image writer already dates PNGs correctly — the doc's "PNG has no
+   EXIF" guidance is outdated (modern PNGs carry an `eXIf` chunk).

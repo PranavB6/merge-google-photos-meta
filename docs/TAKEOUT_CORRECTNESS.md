@@ -68,6 +68,31 @@ exports. Rules you must handle:
 undo truncation by prefix-matching against actual JSON stems in the same folder)
 rather than computing the expected JSON name from the media name.
 
+**Measured against a real 33k-file export (2026):** deriving each JSON's *target
+media name* (undo the supplemental suffix + trailing counter) and matching it to
+the files in the same folder paired **99.7%** of media. Concrete observations:
+
+- The supplemental suffix truncates to *many* lengths in one export, all prefixes
+  of the full word: `.supplemental-metadata` → `.supplemental-met` →
+  `.supplement` → `.suppl` → `.s`. Strip any non-empty dotted segment that is a
+  prefix of `supplemental-metadata`; a real extension (`jpg`, `heic`) isn't one,
+  so it survives.
+- The duplicate counter sits at the **very end** of the JSON name, after the
+  (possibly truncated) suffix: `PXL_…621(1).jpg` ↔
+  `PXL_…621.jpg.supplemental-metada(1).json`.
+- Derivative copies almost never carry their own sidecar (in this export: 80
+  `-edited` media, 1 `-edited` JSON). They must **inherit** the original's JSON.
+  Suffixes seen: `-edited`, `-EFFECTS` (repeatable), `_Bokeh`, `~2`, `-ANIMATION`,
+  and combinations.
+- **Pixel Live Photos** appear as a still + a separate `.MP` (an MP4 motion clip)
+  sharing a stem; the `.MP` half has no sidecar and inherits the still's by stem.
+- **Exclude album/account JSONs** (`metadata.json`, `shared_album_comments.json`,
+  `user-generated-memory-titles.json`, …) — they aren't per-media sidecars.
+- The stubborn residue (~0.3%) is Google-generated derivatives with mangled names
+  (`.MOTION-02.ORIGINAL`, `.LONG_EXPOSURE-01.COVER`, `_exported_…`). Prefer
+  leaving these **unpaired** (they recover a date from their `PXL_<timestamp>`
+  filename) over risking a mis-pair — under-pairing beats writing a wrong date.
+
 ---
 
 ## 3. Dates — photos vs. videos are different systems
@@ -80,12 +105,14 @@ the timezone from the JSON's **GPS coordinates** (lat/lon → tz via a
 timezone-boundary lookup) when present; otherwise you're guessing, and writing UTC
 is a defensible fallback — just know it'll be off by the offset.
 
-For formats with no EXIF (PNG, etc.), the highest tag Google reads is
-`XMP:DateCreated`, then `XMP:DateTimeOriginal`.
+For formats historically without EXIF (PNG, etc.), `XMP:DateCreated` and
+`XMP:DateTimeOriginal` are read. **Note (round-trip tested, 2026):** modern PNGs
+carry an `eXIf` chunk, and Google *does* read `EXIF:DateTimeOriginal` from it —
+writing PNG dates via `-AllDates` works. Only the native `PNG:CreationTime` tEXt
+chunk is ignored by Google.
 
 **Videos:** EXIF tags don't apply. Write `QuickTime:CreateDate` and
-`Keys:CreationDate`. Google treats no-offset values as **UTC**. Use exiftool's
-`-api QuickTimeUTC=1` and either store UTC or include an explicit offset:
+`Keys:CreationDate` under `-api QuickTimeUTC=1`:
 
 ```bash
 exiftool -api QuickTimeUTC=1 \
@@ -93,6 +120,22 @@ exiftool -api QuickTimeUTC=1 \
   -Keys:CreationDate="2023:07:15 14:30:00-05:00" \
   -overwrite_original video.mp4
 ```
+
+**Round-trip tested against Google Photos (2026) — this matters more than it
+looks:**
+
+- Writing a **naive local** value with no offset (and no `QuickTimeUTC`) is
+  *wrong*. Google reads the QuickTime date as UTC and then **converts it to the
+  viewing account's timezone**, so an intended 3:09 PM displayed as 9:09 AM
+  (GMT-06:00). The displayed time is therefore *viewer-dependent*, not just
+  shifted by a constant.
+- Writing with an **explicit offset** in `Keys:CreationDate` (as above) is
+  honored verbatim — Google displayed the intended 3:09 PM.
+- When you have **no offset source** (the Takeout timestamp is a bare UTC epoch),
+  write the true UTC instant with a `+00:00` offset. Tested: Google displays the
+  UTC wall-clock at GMT+00:00 — off by the real local offset, but *predictable*
+  and not viewer-dependent. Swap `+00:00` for a real offset (e.g. GPS-derived)
+  later and the displayed time becomes exactly correct, no other change.
 
 Google Photos imports only **date and GPS** from video metadata — nothing else.
 
