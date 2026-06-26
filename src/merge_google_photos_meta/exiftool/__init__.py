@@ -17,6 +17,7 @@ from .metadata import (
     BatchResult,
     PhotoMetadata,
     read_metadata,
+    read_metadata_batch,
     write_metadata,
     write_metadata_batch,
 )
@@ -33,6 +34,7 @@ __all__ = [
     "PhotoMetadata",
     "UnsupportedFileType",
     "read_metadata",
+    "read_metadata_batch",
     "resolve_exiftool",
     "write_metadata",
     "write_metadata_batch",

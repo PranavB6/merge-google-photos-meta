@@ -23,6 +23,11 @@ VIDEO_EXTENSIONS = frozenset({".mp4", ".mov", ".m4v", ".3gp", ".3g2"})
 # Everything we know how to write metadata to.
 SUPPORTED_EXTENSIONS = IMAGE_EXTENSIONS | VIDEO_EXTENSIONS
 
+# ExifTool can process many files in one invocation, but the per-call arguments
+# go on the command line, which the OS caps (~32 KB on Windows). Chunking keeps
+# each call comfortably under that while still amortizing startup across files.
+MAX_BATCH_SIZE = 100
+
 
 class PhotoMetadata(TypedDict, total=False):
     """Google Photos-relevant metadata fields. All keys are optional; only the
@@ -66,6 +71,54 @@ def read_metadata(exiftool_path: str, image_path: str) -> dict:
     return json.loads(result.stdout)[0]
 
 
+def read_metadata_batch(
+    exiftool_path: str,
+    file_paths: list[str],
+    *,
+    batch_size: int = 50,
+) -> dict[str, dict]:
+    """Read metadata for many files, batching to amortize ExifTool startup.
+
+    ``-json`` already returns one object per file, so each chunk is read in a
+    single process by passing all its paths at once. The result maps each
+    readable file's path (exactly the string you passed) to its tag dict. Files
+    ExifTool can't read are simply absent, so ``result.get(path)`` is ``None``
+    for them.
+
+    Args:
+        file_paths: Files to read.
+        batch_size: Files per ExifTool invocation (1..``MAX_BATCH_SIZE``).
+
+    Raises:
+        ValueError: if ``batch_size`` is outside 1..``MAX_BATCH_SIZE``.
+        ExifToolError: only for whole-chunk failures (e.g. a timeout);
+            individual unreadable files are omitted, not raised.
+    """
+    if not 1 <= batch_size <= MAX_BATCH_SIZE:
+        raise ValueError(f"batch_size must be between 1 and {MAX_BATCH_SIZE}")
+
+    out: dict[str, dict] = {}
+    for start in range(0, len(file_paths), batch_size):
+        chunk = file_paths[start : start + batch_size]
+        # check=False: unreadable files just won't appear in the JSON; we don't
+        # want one missing file to abort the whole read.
+        completed = run(
+            exiftool_path,
+            ["-json", "-G", *chunk],
+            action="read",
+            target=f"{len(chunk)} files",
+            check=False,
+        )
+        if not completed.stdout.strip():
+            continue
+        for obj in json.loads(completed.stdout):
+            # ExifTool sets SourceFile to the verbatim path argument, so it's
+            # both our key and exactly the string the caller passed. A missing
+            # one means malformed output, so let the KeyError surface.
+            out[obj["SourceFile"]] = obj
+    return out
+
+
 def _image_write_args(metadata: PhotoMetadata) -> list[str]:
     """Tag assignments for still images (EXIF/IPTC/XMP)."""
     args: list[str] = []
@@ -106,17 +159,19 @@ def _video_write_args(metadata: PhotoMetadata) -> list[str]:
 
     date_taken = metadata.get("date_taken")
     if date_taken is not None:
-        stamp = date_taken.strftime("%Y:%m:%d %H:%M:%S")
-        # QuickTime dates are UTC by spec, but Google Photos doesn't read a
-        # timezone, so we write the naive value verbatim (no -api QuickTimeUTC)
-        # to keep the displayed time matching what we intend.
-        for tag in (
-            "QuickTime:CreateDate",
-            "QuickTime:ModifyDate",
-            "QuickTime:TrackCreateDate",
-            "QuickTime:MediaCreateDate",
-        ):
-            args.append(f"-{tag}={stamp}")
+        # Google reads QuickTime dates as UTC and converts them to the *viewer's*
+        # account timezone, so a naive local value displays as the wrong time.
+        # Instead we write the value with an explicit offset under
+        # -api QuickTimeUTC=1, which Google honors verbatim (confirmed by a
+        # round-trip test against Google Photos). The Takeout timestamp is a UTC
+        # epoch with no offset, so we tag it +00:00; the displayed time is then
+        # the UTC wall-clock, off by the real local offset until/unless we derive
+        # one from GPS coordinates. CreateDate + Keys:CreationDate is the minimal
+        # set Google reads.
+        stamp = date_taken.strftime("%Y:%m:%d %H:%M:%S") + "+00:00"
+        args += ["-api", "QuickTimeUTC=1"]
+        args.append(f"-QuickTime:CreateDate={stamp}")
+        args.append(f"-Keys:CreationDate={stamp}")
 
     # Video GPS is one combined Keys:GPSCoordinates tag, not separate lat/lon
     # with hemisphere refs. Google Photos ignores coordinates with more than 5
@@ -179,9 +234,11 @@ def write_metadata(
     tags Google Photos reads are written: ``EXIF:DateTimeOriginal`` (via
     ``-AllDates``), the ``GPS:*`` group, and ``IPTC:Caption-Abstract`` +
     ``XMP-dc:Description``. For QuickTime video (extensions in
-    :data:`VIDEO_EXTENSIONS`) the equivalent QuickTime tags are written:
-    ``QuickTime:CreateDate`` and friends, ``Keys:GPSCoordinates`` (one combined,
-    5-decimal-rounded value), and ``Keys:Description``.
+    :data:`VIDEO_EXTENSIONS`) the equivalent QuickTime tags are written under
+    ``-api QuickTimeUTC=1``: ``QuickTime:CreateDate`` and ``Keys:CreationDate``
+    (both with an explicit ``+00:00`` offset so Google displays them verbatim),
+    ``Keys:GPSCoordinates`` (one combined, 5-decimal-rounded value), and
+    ``Keys:Description``.
 
     Only the keys present in ``metadata`` are written; absent keys are left
     untouched. For video, latitude and longitude are written only when both are
@@ -230,12 +287,6 @@ def _parse_error_files(stderr: str) -> dict[str, str]:
             message, path = line[len("Error:") :].strip().rsplit(" - ", 1)
             errors[path] = message.strip()
     return errors
-
-
-# ExifTool can write many files in one process, but the per-call arguments go
-# on the command line, which the OS caps (~32 KB on Windows). Chunking keeps
-# each call comfortably under that while still amortizing startup across files.
-MAX_BATCH_SIZE = 100
 
 
 def _run_chunk(

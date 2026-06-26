@@ -219,4 +219,12 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Source Data
 data/
+
+# Sqlite
+*.sqlite
+
+# Tool output (copies of the source library) and cache sidecars
+output-*/
+*.mgpm-cache.sqlite*
